@@ -20,6 +20,19 @@ class UsuarioNovo(BaseModel):
     cpf: str
     android_id: str
 
+class RotaBackup(BaseModel):
+    firebase_uid: str
+    data_inicio_millis: int
+    data_fim_millis: int
+    tempo_decorrido_segundos: int
+    total_paradas: int
+    pacotes_entregues: int
+    pacotes_falhos: int
+    km_rodados: float
+    faturamento_bruto: float
+    consumo_kml: float
+    preco_combustivel: float
+
 # --- FUNÇÃO DE CONEXÃO COM O NEON ---
 def get_db_connection():
     try:
@@ -120,6 +133,35 @@ def status_assinatura(firebase_uid: str):
             return {"status": status_atual, "bloquear_app": False, "vence_em": data_vencimento}
             
         raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+    finally:
+        cursor.close()
+        conn.close()
+
+# ==========================================
+# 4. ROTA PARA SALVAR O HISTÓRICO DA ROTA
+# ==========================================
+@app.post("/salvar-historico")
+def salvar_historico(rota: RotaBackup):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            INSERT INTO historico_rotas (
+                firebase_uid, data_inicio_millis, data_fim_millis, tempo_decorrido_segundos,
+                total_paradas, pacotes_entregues, pacotes_falhos, km_rodados,
+                faturamento_bruto, consumo_kml, preco_combustivel
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, (
+            rota.firebase_uid, rota.data_inicio_millis, rota.data_fim_millis,
+            rota.tempo_decorrido_segundos, rota.total_paradas, rota.pacotes_entregues,
+            rota.pacotes_falhos, rota.km_rodados, rota.faturamento_bruto,
+            rota.consumo_kml, rota.preco_combustivel
+        ))
+        conn.commit()
+        return {"mensagem": "Histórico salvo com sucesso na nuvem!"}
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
     finally:
         cursor.close()
         conn.close()
