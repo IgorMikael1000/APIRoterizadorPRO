@@ -1,5 +1,6 @@
 import os
 import psycopg2
+import psycopg2.extras
 from psycopg2 import errors
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -21,6 +22,7 @@ class UsuarioNovo(BaseModel):
     android_id: str
 
 class RotaBackup(BaseModel):
+    id: str
     firebase_uid: str
     data_inicio_millis: int
     data_fim_millis: int
@@ -147,20 +149,54 @@ def salvar_historico(rota: RotaBackup):
     try:
         cursor.execute("""
             INSERT INTO historico_rotas (
-                firebase_uid, data_inicio_millis, data_fim_millis, tempo_decorrido_segundos,
+                id, firebase_uid, data_inicio_millis, data_fim_millis, tempo_decorrido_segundos,
                 total_paradas, pacotes_entregues, pacotes_falhos, km_rodados,
                 faturamento_bruto, consumo_kml, preco_combustivel
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (id) DO UPDATE SET
+                data_inicio_millis = EXCLUDED.data_inicio_millis,
+                data_fim_millis = EXCLUDED.data_fim_millis,
+                tempo_decorrido_segundos = EXCLUDED.tempo_decorrido_segundos,
+                total_paradas = EXCLUDED.total_paradas,
+                pacotes_entregues = EXCLUDED.pacotes_entregues,
+                pacotes_falhos = EXCLUDED.pacotes_falhos,
+                km_rodados = EXCLUDED.km_rodados,
+                faturamento_bruto = EXCLUDED.faturamento_bruto,
+                consumo_kml = EXCLUDED.consumo_kml,
+                preco_combustivel = EXCLUDED.preco_combustivel
         """, (
-            rota.firebase_uid, rota.data_inicio_millis, rota.data_fim_millis,
+            rota.id, rota.firebase_uid, rota.data_inicio_millis, rota.data_fim_millis,
             rota.tempo_decorrido_segundos, rota.total_paradas, rota.pacotes_entregues,
             rota.pacotes_falhos, rota.km_rodados, rota.faturamento_bruto,
             rota.consumo_kml, rota.preco_combustivel
         ))
         conn.commit()
-        return {"mensagem": "Histórico salvo com sucesso na nuvem!"}
+        return {"mensagem": "Histórico salvo/atualizado com sucesso na nuvem!"}
     except Exception as e:
         conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cursor.close()
+        conn.close()
+
+@app.get("/obter-historico")
+def obter_historico(firebase_uid: str):
+    conn = get_db_connection()
+    # Usa RealDictCursor para retornar um array de dicionários (JSON) direto
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    try:
+        cursor.execute("""
+            SELECT id, data_inicio_millis, data_fim_millis, tempo_decorrido_segundos,
+                   total_paradas, pacotes_entregues, pacotes_falhos, km_rodados,
+                   faturamento_bruto, consumo_kml, preco_combustivel
+            FROM historico_rotas
+            WHERE firebase_uid = %s
+            ORDER BY data_fim_millis DESC
+        """, (firebase_uid,))
+        
+        rotas = cursor.fetchall()
+        return rotas
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         cursor.close()
