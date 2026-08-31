@@ -210,49 +210,26 @@ async def gerar_pix(req: PixRequest):
         "payer": {
             "email": req.email_usuario
         },
-        "description": f"Assinatura RoterizadorPRO - UID:{req.uid_firebase}" # Nome corrigido aqui
+        "description": f"Assinatura RoterizadorPRO - UID:{req.uid_firebase}"
     }
 
     result = sdk.payment().create(payment_data)
-    payment = result["response"]
+    payment = result.get("response", {})
 
+    # Se o Mercado Pago não devolveu um ID, houve um erro. Vamos imprimir o erro real!
     if "id" not in payment:
-        raise HTTPException(status_code=400, detail="Erro ao gerar Pix no Mercado Pago")
+        # Pega a mensagem de erro que o Mercado Pago mandou
+        motivo_erro = payment.get("message", "Erro desconhecido no MP")
+        causas = payment.get("cause", [])
+        
+        # Cria uma string detalhada com o motivo
+        detalhe = f"Recusado pelo MP. Motivo: {motivo_erro} | Causas: {causas}"
+        print(detalhe) # Isso vai aparecer no painel de Logs do Render
+        
+        raise HTTPException(status_code=400, detail=detalhe)
 
     return {
         "id_pagamento": payment["id"],
         "pix_copia_cola": payment["point_of_interaction"]["transaction_data"]["qr_code"],
         "qr_code_base64": payment["point_of_interaction"]["transaction_data"]["qr_code_base64"]
     }
-
-@app.post("/webhook")
-async def mercado_pago_webhook(data: dict):
-    if data.get("type") == "payment":
-        payment_id = data["data"]["id"]
-        
-        # Consulta o Mercado Pago para confirmar se realmente foi pago
-        payment_info = sdk.payment().get(payment_id)
-        status = payment_info["response"]["status"]
-        
-        if status == "approved":
-            # Extrai o UID que mandamos na description "Assinatura Motorista Pro - UID:123..."
-            description = payment_info["response"]["description"]
-            uid = description.split("UID:")[-1]
-            
-            # Adiciona 30 dias de assinatura
-            nova_data_vencimento = datetime.now() + timedelta(days=30)
-            
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            try:
-                cursor.execute("""
-                    UPDATE assinaturas 
-                    SET status = 'ATIVO', data_vencimento = %s 
-                    WHERE firebase_uid = %s
-                """, (nova_data_vencimento, uid))
-                conn.commit()
-            finally:
-                cursor.close()
-                conn.close()
-
-    return {"status": "ok"}
