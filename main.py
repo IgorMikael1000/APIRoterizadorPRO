@@ -210,7 +210,7 @@ async def gerar_pix(req: PixRequest):
         "payer": {
             "email": req.email_usuario
         },
-        "description": f"Assinatura Motorista Pro - UID:{req.uid_firebase}"
+        "description": f"Assinatura RoterizadorPRO - UID:{req.uid_firebase}" # Nome corrigido aqui
     }
 
     result = sdk.payment().create(payment_data)
