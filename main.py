@@ -6,14 +6,19 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
+import mercadopago
 
-# Carrega a URL do banco de dados do arquivo .env
+# Carrega as variáveis do arquivo .env
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
+MERCADO_PAGO_TOKEN = os.getenv("MERCADO_PAGO_ACCESS_TOKEN")
 
 app = FastAPI(title="API Motorista Pro")
 
-# --- MODELOS DE DADOS (O que a API espera receber do Android) ---
+# Inicializa SDK do Mercado Pago
+sdk = mercadopago.SDK(MERCADO_PAGO_TOKEN)
+
+# --- MODELOS DE DADOS ---
 class UsuarioNovo(BaseModel):
     firebase_uid: str
     nome: str
@@ -35,7 +40,12 @@ class RotaBackup(BaseModel):
     consumo_kml: float
     preco_combustivel: float
 
-# --- FUNÇÃO DE CONEXÃO COM O NEON ---
+class PixRequest(BaseModel):
+    email_usuario: str
+    valor: float
+    uid_firebase: str
+
+# --- CONEXÃO COM O NEON ---
 def get_db_connection():
     try:
         conn = psycopg2.connect(DATABASE_URL)
@@ -43,9 +53,7 @@ def get_db_connection():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro de conexão com o banco: {str(e)}")
 
-# ==========================================
-# 1. ROTA DO AUTO-UPDATE (Manifesto)
-# ==========================================
+
 @app.get("/checar-versao")
 def checar_versao():
     conn = get_db_connection()
@@ -66,22 +74,18 @@ def checar_versao():
         cursor.close()
         conn.close()
 
-# ==========================================
-# 2. ROTA DE REGISTRO E LIBERAÇÃO DOS 7 DIAS
-# ==========================================
+
 @app.post("/registrar-usuario")
 def registrar_usuario(user: UsuarioNovo):
     conn = get_db_connection()
     cursor = conn.cursor()
     
     try:
-        # 1. Tenta inserir o usuário (As travas UNIQUE do CPF e ANDROID_ID vão atuar aqui)
         cursor.execute("""
             INSERT INTO usuarios (firebase_uid, nome, email, cpf, android_id)
             VALUES (%s, %s, %s, %s, %s)
         """, (user.firebase_uid, user.nome, user.email, user.cpf, user.android_id))
         
-        # 2. Se passou, cria a assinatura TRIAL com vencimento para daqui a 7 dias
         data_vencimento = datetime.now() + timedelta(days=7)
         
         cursor.execute("""
@@ -101,18 +105,14 @@ def registrar_usuario(user: UsuarioNovo):
             raise HTTPException(status_code=400, detail="Este dispositivo já esgotou o limite de contas grátis.")
         else:
             raise HTTPException(status_code=400, detail="E-mail já cadastrado.")
-            
     except Exception as e:
         conn.rollback()
         raise HTTPException(status_code=500, detail=str(e))
-        
     finally:
         cursor.close()
         conn.close()
 
-# ==========================================
-# 3. ROTA DE CHECAGEM DO PAYWALL (Bloqueio)
-# ==========================================
+
 @app.get("/status-assinatura/{firebase_uid}")
 def status_assinatura(firebase_uid: str):
     conn = get_db_connection()
@@ -125,9 +125,7 @@ def status_assinatura(firebase_uid: str):
             status_atual = assinatura[0]
             data_vencimento = assinatura[1]
             
-            # Checa se a data de hoje já ultrapassou o vencimento
             if datetime.now(data_vencimento.tzinfo) > data_vencimento:
-                # Opcional: Atualizar no banco para 'VENCIDA'
                 cursor.execute("UPDATE assinaturas SET status = 'VENCIDA' WHERE firebase_uid = %s", (firebase_uid,))
                 conn.commit()
                 return {"status": "VENCIDA", "bloquear_app": True}
@@ -139,9 +137,7 @@ def status_assinatura(firebase_uid: str):
         cursor.close()
         conn.close()
 
-# ==========================================
-# 4. ROTA PARA SALVAR O HISTÓRICO DA ROTA
-# ==========================================
+
 @app.post("/salvar-historico")
 def salvar_historico(rota: RotaBackup):
     conn = get_db_connection()
@@ -179,10 +175,10 @@ def salvar_historico(rota: RotaBackup):
         cursor.close()
         conn.close()
 
+
 @app.get("/obter-historico")
 def obter_historico(firebase_uid: str):
     conn = get_db_connection()
-    # Usa RealDictCursor para retornar um array de dicionários (JSON) direto
     cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     try:
         cursor.execute("""
@@ -201,3 +197,62 @@ def obter_historico(firebase_uid: str):
     finally:
         cursor.close()
         conn.close()
+
+
+# ==========================================
+# 5. ROTAS DE PAGAMENTO (MERCADO PAGO)
+# ==========================================
+@app.post("/gerar-pix")
+async def gerar_pix(req: PixRequest):
+    payment_data = {
+        "transaction_amount": req.valor,
+        "payment_method_id": "pix",
+        "payer": {
+            "email": req.email_usuario
+        },
+        "description": f"Assinatura Motorista Pro - UID:{req.uid_firebase}"
+    }
+
+    result = sdk.payment().create(payment_data)
+    payment = result["response"]
+
+    if "id" not in payment:
+        raise HTTPException(status_code=400, detail="Erro ao gerar Pix no Mercado Pago")
+
+    return {
+        "id_pagamento": payment["id"],
+        "pix_copia_cola": payment["point_of_interaction"]["transaction_data"]["qr_code"],
+        "qr_code_base64": payment["point_of_interaction"]["transaction_data"]["qr_code_base64"]
+    }
+
+@app.post("/webhook")
+async def mercado_pago_webhook(data: dict):
+    if data.get("type") == "payment":
+        payment_id = data["data"]["id"]
+        
+        # Consulta o Mercado Pago para confirmar se realmente foi pago
+        payment_info = sdk.payment().get(payment_id)
+        status = payment_info["response"]["status"]
+        
+        if status == "approved":
+            # Extrai o UID que mandamos na description "Assinatura Motorista Pro - UID:123..."
+            description = payment_info["response"]["description"]
+            uid = description.split("UID:")[-1]
+            
+            # Adiciona 30 dias de assinatura
+            nova_data_vencimento = datetime.now() + timedelta(days=30)
+            
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            try:
+                cursor.execute("""
+                    UPDATE assinaturas 
+                    SET status = 'ATIVO', data_vencimento = %s 
+                    WHERE firebase_uid = %s
+                """, (nova_data_vencimento, uid))
+                conn.commit()
+            finally:
+                cursor.close()
+                conn.close()
+
+    return {"status": "ok"}
