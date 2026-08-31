@@ -216,16 +216,11 @@ async def gerar_pix(req: PixRequest):
     result = sdk.payment().create(payment_data)
     payment = result.get("response", {})
 
-    # Se o Mercado Pago não devolveu um ID, houve um erro. Vamos imprimir o erro real!
     if "id" not in payment:
-        # Pega a mensagem de erro que o Mercado Pago mandou
         motivo_erro = payment.get("message", "Erro desconhecido no MP")
         causas = payment.get("cause", [])
-        
-        # Cria uma string detalhada com o motivo
         detalhe = f"Recusado pelo MP. Motivo: {motivo_erro} | Causas: {causas}"
-        print(detalhe) # Isso vai aparecer no painel de Logs do Render
-        
+        print(detalhe)
         raise HTTPException(status_code=400, detail=detalhe)
 
     return {
@@ -233,3 +228,57 @@ async def gerar_pix(req: PixRequest):
         "pix_copia_cola": payment["point_of_interaction"]["transaction_data"]["qr_code"],
         "qr_code_base64": payment["point_of_interaction"]["transaction_data"]["qr_code_base64"]
     }
+
+
+@app.post("/webhook")
+async def mercado_pago_webhook(data: dict):
+    print(f"WEBHOOK RECEBIDO DO MP: {data}")
+    
+    try:
+        tipo = data.get("type") or data.get("topic")
+        data_payload = data.get("data", {})
+        payment_id = data_payload.get("id")
+        
+        if not payment_id and "id" in data:
+            payment_id = data.get("id")
+
+        if tipo == "payment" and payment_id:
+            payment_info = sdk.payment().get(payment_id)
+            payment_response = payment_info.get("response", {})
+            status = payment_response.get("status")
+            
+            print(f"Pagamento ID {payment_id} consultado. Status no MP: {status}")
+            
+            if status == "approved":
+                description = payment_response.get("description", "")
+                print(f"Descrição do pagamento: {description}")
+                
+                if "UID:" in description:
+                    uid = description.split("UID:")[-1].strip()
+                    nova_data_vencimento = datetime.now() + timedelta(days=30)
+                    
+                    conn = get_db_connection()
+                    cursor = conn.cursor()
+                    try:
+                        cursor.execute("""
+                            UPDATE assinaturas 
+                            SET status = 'ATIVO', data_vencimento = %s 
+                            WHERE firebase_uid = %s
+                        """, (nova_data_vencimento, uid))
+                        conn.commit()
+                        print(f"SUCESSO: Assinatura do usuário {uid} atualizada para ATIVO!")
+                    except Exception as db_err:
+                        print(f"Erro ao atualizar banco de dados: {str(db_err)}")
+                        conn.rollback()
+                    finally:
+                        cursor.close()
+                        conn.close()
+                else:
+                    print("AVISO: UID não encontrado na descrição do pagamento.")
+        else:
+            print(f"Webhook ignorado. Tipo: {tipo}, ID: {payment_id}")
+
+    except Exception as e:
+        print(f"ERRO CRÍTICO NO WEBHOOK: {str(e)}")
+
+    return {"status": "ok"}
