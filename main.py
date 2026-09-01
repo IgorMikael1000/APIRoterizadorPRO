@@ -112,6 +112,25 @@ def registrar_usuario(user: UsuarioNovo):
         cursor.close()
         conn.close()
 
+# --- NOVO: ROTA DE EXCLUSÃO DE CONTA (EXIGÊNCIA GOOGLE PLAY) ---
+@app.delete("/deletar-usuario/{firebase_uid}")
+def deletar_usuario(firebase_uid: str):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        # Remove dados de todas as tabelas vinculadas ao usuário
+        cursor.execute("DELETE FROM assinaturas WHERE firebase_uid = %s;", (firebase_uid,))
+        cursor.execute("DELETE FROM historico_rotas WHERE firebase_uid = %s;", (firebase_uid,))
+        cursor.execute("DELETE FROM usuarios WHERE firebase_uid = %s;", (firebase_uid,))
+        
+        conn.commit()
+        return {"mensagem": "Usuário e todos os seus dados foram excluídos com sucesso."}
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"Erro ao excluir dados do servidor: {str(e)}")
+    finally:
+        cursor.close()
+        conn.close()
 
 @app.get("/status-assinatura/{firebase_uid}")
 def status_assinatura(firebase_uid: str):
