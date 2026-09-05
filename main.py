@@ -217,6 +217,25 @@ def obter_historico(firebase_uid: str):
         cursor.close()
         conn.close()
 
+# --- NOVO: ROTA DE EXCLUSÃO DE HISTÓRICO ÚNICO ---
+@app.delete("/deletar-historico/{rota_id}")
+def deletar_historico(rota_id: str):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("DELETE FROM historico_rotas WHERE id = %s;", (rota_id,))
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Rota não encontrada no histórico.")
+        conn.commit()
+        return {"mensagem": "Rota deletada com sucesso do histórico."}
+    except HTTPException:
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cursor.close()
+        conn.close()
 
 # ==========================================
 # 5. ROTAS DE PAGAMENTO (MERCADO PAGO)
