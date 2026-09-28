@@ -6,17 +6,12 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
-import mercadopago
 
 # Carrega as variáveis do arquivo .env
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
-MERCADO_PAGO_TOKEN = os.getenv("MERCADO_PAGO_ACCESS_TOKEN")
 
 app = FastAPI(title="API Motorista Pro")
-
-# Inicializa SDK do Mercado Pago
-sdk = mercadopago.SDK(MERCADO_PAGO_TOKEN)
 
 # --- MODELOS DE DADOS ---
 class UsuarioNovo(BaseModel):
@@ -40,10 +35,9 @@ class RotaBackup(BaseModel):
     consumo_kml: float
     preco_combustivel: float
 
-class PixRequest(BaseModel):
-    email_usuario: str
-    valor: float
-    uid_firebase: str
+class AssinaturaUpdate(BaseModel):
+    firebase_uid: str
+    status: str  # Ex: 'ATIVO', 'VENCIDA'
 
 # --- CONEXÃO COM O NEON ---
 def get_db_connection():
@@ -86,6 +80,7 @@ def registrar_usuario(user: UsuarioNovo):
             VALUES (%s, %s, %s, %s, %s)
         """, (user.firebase_uid, user.nome, user.email, user.cpf, user.android_id))
         
+        # Concede 7 dias de teste grátis (TRIAL)
         data_vencimento = datetime.now() + timedelta(days=7)
         
         cursor.execute("""
@@ -112,13 +107,12 @@ def registrar_usuario(user: UsuarioNovo):
         cursor.close()
         conn.close()
 
-# --- NOVO: ROTA DE EXCLUSÃO DE CONTA (EXIGÊNCIA GOOGLE PLAY) ---
+
 @app.delete("/deletar-usuario/{firebase_uid}")
 def deletar_usuario(firebase_uid: str):
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
-        # Remove dados de todas as tabelas vinculadas ao usuário
         cursor.execute("DELETE FROM assinaturas WHERE firebase_uid = %s;", (firebase_uid,))
         cursor.execute("DELETE FROM historico_rotas WHERE firebase_uid = %s;", (firebase_uid,))
         cursor.execute("DELETE FROM usuarios WHERE firebase_uid = %s;", (firebase_uid,))
@@ -132,6 +126,7 @@ def deletar_usuario(firebase_uid: str):
         cursor.close()
         conn.close()
 
+
 @app.get("/status-assinatura/{firebase_uid}")
 def status_assinatura(firebase_uid: str):
     conn = get_db_connection()
@@ -144,7 +139,8 @@ def status_assinatura(firebase_uid: str):
             status_atual = assinatura[0]
             data_vencimento = assinatura[1]
             
-            if datetime.now(data_vencimento.tzinfo) > data_vencimento:
+            # Verifica se o período expirou
+            if datetime.now(data_vencimento.tzinfo) > data_vencimento and status_atual != 'ATIVO':
                 cursor.execute("UPDATE assinaturas SET status = 'VENCIDA' WHERE firebase_uid = %s", (firebase_uid,))
                 conn.commit()
                 return {"status": "VENCIDA", "bloquear_app": True}
@@ -152,6 +148,28 @@ def status_assinatura(firebase_uid: str):
             return {"status": status_atual, "bloquear_app": False, "vence_em": data_vencimento}
             
         raise HTTPException(status_code=404, detail="Usuário não encontrado.")
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@app.post("/atualizar-assinatura")
+def atualizar_assinatura(req: AssinaturaUpdate):
+    """Rota usada pelo app (ou Mock de Billing) para ativar a assinatura por 30 dias."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        nova_data_vencimento = datetime.now() + timedelta(days=30)
+        cursor.execute("""
+            UPDATE assinaturas 
+            SET status = %s, data_vencimento = %s 
+            WHERE firebase_uid = %s
+        """, (req.status, nova_data_vencimento, req.firebase_uid))
+        conn.commit()
+        return {"mensagem": "Assinatura atualizada com sucesso na nuvem!", "nova_data": nova_data_vencimento}
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
     finally:
         cursor.close()
         conn.close()
@@ -217,7 +235,7 @@ def obter_historico(firebase_uid: str):
         cursor.close()
         conn.close()
 
-# --- NOVO: ROTA DE EXCLUSÃO DE HISTÓRICO ÚNICO ---
+
 @app.delete("/deletar-historico/{rota_id}")
 def deletar_historico(rota_id: str):
     conn = get_db_connection()
@@ -236,87 +254,3 @@ def deletar_historico(rota_id: str):
     finally:
         cursor.close()
         conn.close()
-
-# ==========================================
-# 5. ROTAS DE PAGAMENTO (MERCADO PAGO)
-# ==========================================
-@app.post("/gerar-pix")
-async def gerar_pix(req: PixRequest):
-    payment_data = {
-        "transaction_amount": req.valor,
-        "payment_method_id": "pix",
-        "payer": {
-            "email": req.email_usuario
-        },
-        "description": f"Assinatura RoterizadorPRO - UID:{req.uid_firebase}"
-    }
-
-    result = sdk.payment().create(payment_data)
-    payment = result.get("response", {})
-
-    if "id" not in payment:
-        motivo_erro = payment.get("message", "Erro desconhecido no MP")
-        causas = payment.get("cause", [])
-        detalhe = f"Recusado pelo MP. Motivo: {motivo_erro} | Causas: {causas}"
-        print(detalhe)
-        raise HTTPException(status_code=400, detail=detalhe)
-
-    return {
-        "id_pagamento": payment["id"],
-        "pix_copia_cola": payment["point_of_interaction"]["transaction_data"]["qr_code"],
-        "qr_code_base64": payment["point_of_interaction"]["transaction_data"]["qr_code_base64"]
-    }
-
-
-@app.post("/webhook")
-async def mercado_pago_webhook(data: dict):
-    print(f"WEBHOOK RECEBIDO DO MP: {data}")
-    
-    try:
-        tipo = data.get("type") or data.get("topic")
-        data_payload = data.get("data", {})
-        payment_id = data_payload.get("id")
-        
-        if not payment_id and "id" in data:
-            payment_id = data.get("id")
-
-        if tipo == "payment" and payment_id:
-            payment_info = sdk.payment().get(payment_id)
-            payment_response = payment_info.get("response", {})
-            status = payment_response.get("status")
-            
-            print(f"Pagamento ID {payment_id} consultado. Status no MP: {status}")
-            
-            if status == "approved":
-                description = payment_response.get("description", "")
-                print(f"Descrição do pagamento: {description}")
-                
-                if "UID:" in description:
-                    uid = description.split("UID:")[-1].strip()
-                    nova_data_vencimento = datetime.now() + timedelta(days=30)
-                    
-                    conn = get_db_connection()
-                    cursor = conn.cursor()
-                    try:
-                        cursor.execute("""
-                            UPDATE assinaturas 
-                            SET status = 'ATIVO', data_vencimento = %s 
-                            WHERE firebase_uid = %s
-                        """, (nova_data_vencimento, uid))
-                        conn.commit()
-                        print(f"SUCESSO: Assinatura do usuário {uid} atualizada para ATIVO!")
-                    except Exception as db_err:
-                        print(f"Erro ao atualizar banco de dados: {str(db_err)}")
-                        conn.rollback()
-                    finally:
-                        cursor.close()
-                        conn.close()
-                else:
-                    print("AVISO: UID não encontrado na descrição do pagamento.")
-        else:
-            print(f"Webhook ignorado. Tipo: {tipo}, ID: {payment_id}")
-
-    except Exception as e:
-        print(f"ERRO CRÍTICO NO WEBHOOK: {str(e)}")
-
-    return {"status": "ok"}
