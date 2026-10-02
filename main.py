@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
 import mercadopago
+from typing import Optional
 
 # Carrega as variáveis do arquivo .env
 load_dotenv()
@@ -55,10 +56,10 @@ class PixRequest(BaseModel):
 class CartaoRequest(BaseModel):
     firebase_uid: str
     email: str
-    token: str # Token do cartão gerado no frontend
-    payment_method_id: str # Ex: 'master', 'visa'
-    issuer_id: str # ID do banco emissor
-    installments: int # Número de parcelas (geralmente 1 para assinatura)
+    token: str
+    payment_method_id: str
+    issuer_id: Optional[str] = None  # Tornamos opcional
+    installments: int
 
 
 # --- CONEXÃO COM O NEON ---
@@ -239,12 +240,15 @@ def pagar_cartao(req: CartaoRequest):
         "description": "Assinatura Mensal - Roterizador PRO",
         "installments": req.installments,
         "payment_method_id": req.payment_method_id,
-        "issuer_id": req.issuer_id,
         "payer": {
             "email": req.email
         },
-        "external_reference": req.firebase_uid # Identificador fundamental para o Webhook
+        "external_reference": req.firebase_uid
     }
+
+    # Só envia o issuer_id se o Android tiver enviado um número válido
+    if req.issuer_id and req.issuer_id.isdigit():
+        payment_data["issuer_id"] = int(req.issuer_id)
 
     result = sdk.payment().create(payment_data)
     payment = result.get("response", {})
@@ -254,10 +258,9 @@ def pagar_cartao(req: CartaoRequest):
 
     return {
         "id_pagamento": payment["id"],
-        "status": payment.get("status"), # Pode ser 'approved', 'in_process', 'rejected'
+        "status": payment.get("status"), 
         "status_detail": payment.get("status_detail")
     }
-
 
 @app.post("/webhook-mercadopago")
 async def webhook_mercadopago(request: Request):
