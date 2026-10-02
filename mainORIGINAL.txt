@@ -208,8 +208,7 @@ def gerar_pix(req: PixRequest):
         "transaction_amount": 9.90,
         "payment_method_id": "pix",
         "payer": {
-            # E-mail de teste fixo para evitar erro 401 no ambiente de Sandbox
-            "email": "TESTUSER2481559370023510238@testuser.com",
+            "email": req.email,
             "first_name": req.nome,
             "identification": {
                 "type": "CPF",
@@ -242,8 +241,7 @@ def pagar_cartao(req: CartaoRequest):
         "installments": req.installments,
         "payment_method_id": req.payment_method_id,
         "payer": {
-            # E-mail de teste fixo para evitar erro 401 no ambiente de Sandbox
-            "email": "TESTUSER2481559370023510238@testuser.com"
+            "email": req.email
         },
         "external_reference": req.firebase_uid
     }
