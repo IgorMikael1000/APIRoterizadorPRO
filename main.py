@@ -6,21 +6,15 @@ from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
-import mercadopago
 from typing import Optional
 
-# Carrega as variáveis do arquivo .env[cite: 9]
+# Carrega as variáveis do arquivo .env
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
-# Variável de ambiente do Render[cite: 9]
-MERCADO_PAGO_ACCESS_TOKEN = os.getenv("ACCESS_TOKEN") 
 
 app = FastAPI(title="API Motorista Pro")
 
-# Inicializa o SDK do Mercado Pago[cite: 9]
-sdk = mercadopago.SDK(MERCADO_PAGO_ACCESS_TOKEN)
-
-# --- CONFIGURAÇÃO DOS PLANOS (Valores Progressivos)[cite: 9] ---
+# --- CONFIGURAÇÃO DOS PLANOS (Valores Progressivos) ---
 PLANOS = {
     "mensal": {"dias": 30, "valor": 9.90, "desc": "Assinatura Mensal"},
     "trimestral": {"dias": 90, "valor": 26.90, "desc": "Assinatura Trimestral"},
@@ -28,7 +22,7 @@ PLANOS = {
     "anual": {"dias": 365, "valor": 94.90, "desc": "Assinatura Anual"}
 }
 
-# --- MODELOS DE DADOS[cite: 9] ---
+# --- MODELOS DE DADOS ---
 class UsuarioNovo(BaseModel):
     firebase_uid: str
     nome: str
@@ -52,19 +46,11 @@ class RotaBackup(BaseModel):
 
 class AssinaturaUpdate(BaseModel):
     firebase_uid: str
-    status: str  # Ex: 'ATIVO', 'VENCIDA'[cite: 9]
-    plano: str = "mensal" # Aceita 'mensal', 'trimestral', 'semestral', 'anual'[cite: 9]
-
-# Modelos do Mercado Pago[cite: 9]
-class PixRequest(BaseModel):
-    firebase_uid: str
-    email: str
-    nome: str
-    cpf: str
-    plano: str = "mensal"
+    status: str  # Ex: 'ATIVO', 'VENCIDA'
+    plano: str = "mensal" # Aceita 'mensal', 'trimestral', 'semestral', 'anual'
 
 
-# --- CONEXÃO COM O NEON[cite: 9] ---
+# --- CONEXÃO COM O NEON ---
 def get_db_connection():
     try:
         conn = psycopg2.connect(DATABASE_URL)
@@ -84,7 +70,7 @@ def registrar_usuario(user: UsuarioNovo):
             VALUES (%s, %s, %s, %s, %s)
         """, (user.firebase_uid, user.nome, user.email, user.cpf, user.android_id))
         
-        # Concede 7 dias de teste grátis (TRIAL)[cite: 9]
+        # Concede 7 dias de teste grátis (TRIAL)
         data_vencimento = datetime.now() + timedelta(days=7)
         
         cursor.execute("""
@@ -143,7 +129,7 @@ def status_assinatura(firebase_uid: str):
             status_atual = assinatura[0]
             data_vencimento = assinatura[1]
             
-            # Verifica se o período expirou[cite: 9]
+            # Verifica se o período expirou
             if datetime.now(data_vencimento.tzinfo) > data_vencimento and status_atual != 'ATIVO':
                 cursor.execute("UPDATE assinaturas SET status = 'VENCIDA' WHERE firebase_uid = %s", (firebase_uid,))
                 conn.commit()
@@ -159,7 +145,7 @@ def status_assinatura(firebase_uid: str):
 
 @app.post("/atualizar-assinatura")
 def atualizar_assinatura(req: AssinaturaUpdate):
-    """Rota usada pelo app (Google Billing) para ativar a assinatura com base no plano escolhido."""[cite: 9]
+    """Rota usada pelo app (Google Billing) para ativar a assinatura com base no plano escolhido."""
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
@@ -182,104 +168,7 @@ def atualizar_assinatura(req: AssinaturaUpdate):
 
 
 # ==========================================
-# ROTAS DO MERCADO PAGO (PIX COM PLANOS)[cite: 9]
-# ==========================================
-
-@app.post("/gerar-pix")
-def gerar_pix(req: PixRequest):
-    plano_info = PLANOS.get(req.plano.lower(), PLANOS["mensal"])
-    
-    # Codifica o UID e o plano na external_reference para o Webhook identificar depois[cite: 9]
-    external_ref = f"{req.firebase_uid}|{req.plano.lower()}"
-
-    payment_data = {
-        "transaction_amount": plano_info["valor"],
-        "payment_method_id": "pix",
-        "payer": {
-            "email": req.email,
-            "first_name": req.nome,
-            "identification": {
-                "type": "CPF",
-                "number": req.cpf
-            }
-        },
-        "description": f"{plano_info['desc']} - Roterizador PRO",
-        "external_reference": external_ref 
-    }
-
-    result = sdk.payment().create(payment_data)
-    payment = result.get("response", {})
-
-    if "id" not in payment:
-        raise HTTPException(status_code=400, detail=f"Erro ao gerar Pix no MP: {payment}")
-
-    return {
-        "id_pagamento": payment["id"],
-        "pix_copia_cola": payment["point_of_interaction"]["transaction_data"]["qr_code"],
-        "qr_code_base64": payment["point_of_interaction"]["transaction_data"]["qr_code_base64"],
-        "plano_gerado": req.plano.lower()
-    }
-
-
-@app.post("/webhook-mercadopago")
-async def webhook_mercadopago(request: Request):
-    """
-    Recebe atualizações de status de pagamento Pix do Mercado Pago.[cite: 9]
-    """
-    try:
-        data = await request.json()
-        print(f"Webhook MP recebido: {data}")
-
-        tipo = data.get("type") or data.get("topic")
-        data_payload = data.get("data", {})
-        payment_id = data_payload.get("id")
-        
-        if not payment_id and "id" in data:
-            payment_id = data.get("id")
-
-        if (tipo == "payment" or data.get("action") == "payment.updated" or data.get("action") == "payment.created") and payment_id:
-            payment_info = sdk.payment().get(payment_id)
-            payment_response = payment_info.get("response", {})
-            status = payment_response.get("status")
-            
-            external_ref_raw = payment_response.get("external_reference", "")
-            
-            # Extrai o UID do Firebase e o Plano codificado[cite: 9]
-            partes_ref = external_ref_raw.split("|")
-            firebase_uid = partes_ref[0] if len(partes_ref) > 0 else None
-            plano_str = partes_ref[1] if len(partes_ref) > 1 else "mensal"
-
-            print(f"Pagamento {payment_id} | Status: {status} | UID: {firebase_uid} | Plano: {plano_str}")
-
-            if status == "approved" and firebase_uid:
-                plano_info = PLANOS.get(plano_str, PLANOS["mensal"])
-                nova_data = datetime.now() + timedelta(days=plano_info["dias"])
-                
-                conn = get_db_connection()
-                cursor = conn.cursor()
-                try:
-                    cursor.execute("""
-                        UPDATE assinaturas 
-                        SET status = 'ATIVO', data_vencimento = %s 
-                        WHERE firebase_uid = %s
-                    """, (nova_data, firebase_uid))
-                    conn.commit()
-                    print(f"Assinatura do UID {firebase_uid} renovada por {plano_info['dias']} dias com sucesso!")
-                except Exception as db_err:
-                    conn.rollback()
-                    print(f"Erro ao atualizar banco via webhook: {db_err}")
-                finally:
-                    cursor.close()
-                    conn.close()
-
-        return {"status": "ok"}
-    except Exception as e:
-        print(f"Erro crítico no processamento do webhook: {str(e)}")
-        return {"status": "error", "detail": str(e)}
-
-
-# ==========================================
-# HISTÓRICO DE ROTAS[cite: 9]
+# HISTÓRICO DE ROTAS
 # ==========================================
 
 @app.post("/salvar-historico")
