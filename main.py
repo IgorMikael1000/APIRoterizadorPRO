@@ -240,7 +240,7 @@ def pagar_cartao(req: CartaoRequest):
         "description": "Assinatura Mensal - Roterizador PRO",
         "installments": req.installments,
         "payer": {
-            "email": "TESTUSER2481559370023510238@testuser.com"
+            "email": req.email
         },
         "external_reference": req.firebase_uid
     }
