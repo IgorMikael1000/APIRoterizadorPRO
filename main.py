@@ -57,8 +57,8 @@ class CartaoRequest(BaseModel):
     firebase_uid: str
     email: str
     token: str
-    payment_method_id: str
-    issuer_id: Optional[str] = None  # Tornamos opcional
+    payment_method_id: Optional[str] = None  # Alterado para opcional
+    issuer_id: Optional[str] = None
     installments: int
 
 
@@ -239,12 +239,15 @@ def pagar_cartao(req: CartaoRequest):
         "token": req.token,
         "description": "Assinatura Mensal - Roterizador PRO",
         "installments": req.installments,
-        "payment_method_id": req.payment_method_id,
         "payer": {
-            "email": req.email
+            "email": "TESTUSER2481559370023510238@testuser.com"
         },
         "external_reference": req.firebase_uid
     }
+
+    # Adiciona o payment_method_id apenas se o app o enviou preenchido
+    if req.payment_method_id:
+        payment_data["payment_method_id"] = req.payment_method_id
 
     # Só envia o issuer_id se o Android tiver enviado um número válido
     if req.issuer_id and req.issuer_id.isdigit():
