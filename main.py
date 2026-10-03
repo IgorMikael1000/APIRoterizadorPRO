@@ -9,18 +9,18 @@ from datetime import datetime, timedelta
 import mercadopago
 from typing import Optional
 
-# Carrega as variáveis do arquivo .env
+# Carrega as variáveis do arquivo .env[cite: 9]
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
-# Variável de ambiente do Render
+# Variável de ambiente do Render[cite: 9]
 MERCADO_PAGO_ACCESS_TOKEN = os.getenv("ACCESS_TOKEN") 
 
 app = FastAPI(title="API Motorista Pro")
 
-# Inicializa o SDK do Mercado Pago
+# Inicializa o SDK do Mercado Pago[cite: 9]
 sdk = mercadopago.SDK(MERCADO_PAGO_ACCESS_TOKEN)
 
-# --- CONFIGURAÇÃO DOS PLANOS (Valores Progressivos) ---
+# --- CONFIGURAÇÃO DOS PLANOS (Valores Progressivos)[cite: 9] ---
 PLANOS = {
     "mensal": {"dias": 30, "valor": 9.90, "desc": "Assinatura Mensal"},
     "trimestral": {"dias": 90, "valor": 26.90, "desc": "Assinatura Trimestral"},
@@ -28,7 +28,7 @@ PLANOS = {
     "anual": {"dias": 365, "valor": 94.90, "desc": "Assinatura Anual"}
 }
 
-# --- MODELOS DE DADOS ---
+# --- MODELOS DE DADOS[cite: 9] ---
 class UsuarioNovo(BaseModel):
     firebase_uid: str
     nome: str
@@ -52,10 +52,10 @@ class RotaBackup(BaseModel):
 
 class AssinaturaUpdate(BaseModel):
     firebase_uid: str
-    status: str  # Ex: 'ATIVO', 'VENCIDA'
-    plano: str = "mensal" # Aceita 'mensal', 'trimestral', 'semestral', 'anual'
+    status: str  # Ex: 'ATIVO', 'VENCIDA'[cite: 9]
+    plano: str = "mensal" # Aceita 'mensal', 'trimestral', 'semestral', 'anual'[cite: 9]
 
-# Modelos do Mercado Pago
+# Modelos do Mercado Pago[cite: 9]
 class PixRequest(BaseModel):
     firebase_uid: str
     email: str
@@ -64,7 +64,7 @@ class PixRequest(BaseModel):
     plano: str = "mensal"
 
 
-# --- CONEXÃO COM O NEON ---
+# --- CONEXÃO COM O NEON[cite: 9] ---
 def get_db_connection():
     try:
         conn = psycopg2.connect(DATABASE_URL)
@@ -105,7 +105,7 @@ def registrar_usuario(user: UsuarioNovo):
             VALUES (%s, %s, %s, %s, %s)
         """, (user.firebase_uid, user.nome, user.email, user.cpf, user.android_id))
         
-        # Concede 7 dias de teste grátis (TRIAL)
+        # Concede 7 dias de teste grátis (TRIAL)[cite: 9]
         data_vencimento = datetime.now() + timedelta(days=7)
         
         cursor.execute("""
@@ -164,7 +164,7 @@ def status_assinatura(firebase_uid: str):
             status_atual = assinatura[0]
             data_vencimento = assinatura[1]
             
-            # Verifica se o período expirou
+            # Verifica se o período expirou[cite: 9]
             if datetime.now(data_vencimento.tzinfo) > data_vencimento and status_atual != 'ATIVO':
                 cursor.execute("UPDATE assinaturas SET status = 'VENCIDA' WHERE firebase_uid = %s", (firebase_uid,))
                 conn.commit()
@@ -180,7 +180,7 @@ def status_assinatura(firebase_uid: str):
 
 @app.post("/atualizar-assinatura")
 def atualizar_assinatura(req: AssinaturaUpdate):
-    """Rota usada pelo app (Google Billing) para ativar a assinatura com base no plano escolhido."""
+    """Rota usada pelo app (Google Billing) para ativar a assinatura com base no plano escolhido."""[cite: 9]
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
@@ -203,14 +203,14 @@ def atualizar_assinatura(req: AssinaturaUpdate):
 
 
 # ==========================================
-# ROTAS DO MERCADO PAGO (PIX COM PLANOS)
+# ROTAS DO MERCADO PAGO (PIX COM PLANOS)[cite: 9]
 # ==========================================
 
 @app.post("/gerar-pix")
 def gerar_pix(req: PixRequest):
     plano_info = PLANOS.get(req.plano.lower(), PLANOS["mensal"])
     
-    # Codifica o UID e o plano na external_reference para o Webhook identificar depois
+    # Codifica o UID e o plano na external_reference para o Webhook identificar depois[cite: 9]
     external_ref = f"{req.firebase_uid}|{req.plano.lower()}"
 
     payment_data = {
@@ -245,7 +245,7 @@ def gerar_pix(req: PixRequest):
 @app.post("/webhook-mercadopago")
 async def webhook_mercadopago(request: Request):
     """
-    Recebe atualizações de status de pagamento Pix do Mercado Pago.
+    Recebe atualizações de status de pagamento Pix do Mercado Pago.[cite: 9]
     """
     try:
         data = await request.json()
@@ -265,7 +265,7 @@ async def webhook_mercadopago(request: Request):
             
             external_ref_raw = payment_response.get("external_reference", "")
             
-            # Extrai o UID do Firebase e o Plano codificado
+            # Extrai o UID do Firebase e o Plano codificado[cite: 9]
             partes_ref = external_ref_raw.split("|")
             firebase_uid = partes_ref[0] if len(partes_ref) > 0 else None
             plano_str = partes_ref[1] if len(partes_ref) > 1 else "mensal"
@@ -300,7 +300,7 @@ async def webhook_mercadopago(request: Request):
 
 
 # ==========================================
-# HISTÓRICO DE ROTAS
+# HISTÓRICO DE ROTAS[cite: 9]
 # ==========================================
 
 @app.post("/salvar-historico")
@@ -346,18 +346,31 @@ def obter_historico(firebase_uid: str):
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     try:
+        # Define o limite de 6 meses atrás (180 dias) em milissegundos
+        seis_meses_atras = datetime.now() - timedelta(days=180)
+        limite_millis = int(seis_meses_atras.timestamp() * 1000)
+
+        # 1. Exclui automaticamente do banco tudo o que for mais antigo que 6 meses para este usuário
+        cursor.execute("""
+            DELETE FROM historico_rotas 
+            WHERE firebase_uid = %s AND data_fim_millis < %s
+        """, (firebase_uid, limite_millis))
+
+        # 2. Busca apenas o histórico dentro do período de retenção de 6 meses
         cursor.execute("""
             SELECT id, data_inicio_millis, data_fim_millis, tempo_decorrido_segundos,
                    total_paradas, pacotes_entregues, pacotes_falhos, km_rodados,
                    faturamento_bruto, consumo_kml, preco_combustivel
             FROM historico_rotas
-            WHERE firebase_uid = %s
+            WHERE firebase_uid = %s AND data_fim_millis >= %s
             ORDER BY data_fim_millis DESC
-        """, (firebase_uid,))
+        """, (firebase_uid, limite_millis))
         
         rotas = cursor.fetchall()
+        conn.commit() # Confirma a exclusão dos registos antigos no banco
         return rotas
     except Exception as e:
+        conn.rollback()
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         cursor.close()
