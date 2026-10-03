@@ -73,27 +73,6 @@ def get_db_connection():
         raise HTTPException(status_code=500, detail=f"Erro de conexão com o banco: {str(e)}")
 
 
-@app.get("/checar-versao")
-def checar_versao():
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute("SELECT versao_codigo, versao_nome, link_drive, notas_atualizacao FROM app_config WHERE id = 1;")
-        config = cursor.fetchone()
-        
-        if config:
-            return {
-                "versao_codigo": config[0],
-                "versao_nome": config[1],
-                "link_drive": config[2],
-                "notas_atualizacao": config[3]
-            }
-        raise HTTPException(status_code=404, detail="Configuração não encontrada.")
-    finally:
-        cursor.close()
-        conn.close()
-
-
 @app.post("/registrar-usuario")
 def registrar_usuario(user: UsuarioNovo):
     conn = get_db_connection()
