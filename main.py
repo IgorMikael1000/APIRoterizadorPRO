@@ -245,9 +245,8 @@ def pagar_cartao(req: CartaoRequest):
         "external_reference": req.firebase_uid
     }
 
-    # Adiciona o payment_method_id apenas se o app o enviou preenchido
-    if req.payment_method_id:
-        payment_data["payment_method_id"] = req.payment_method_id
+    # Nota: O payment_method_id foi removido daqui porque 
+    # o 'token' do cartão já informa a bandeira automaticamente ao Mercado Pago.
 
     # Só envia o issuer_id se o Android tiver enviado um número válido
     if req.issuer_id and req.issuer_id.isdigit():
