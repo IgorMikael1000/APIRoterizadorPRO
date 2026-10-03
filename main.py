@@ -53,14 +53,6 @@ class PixRequest(BaseModel):
     nome: str
     cpf: str
 
-class CartaoRequest(BaseModel):
-    firebase_uid: str
-    email: str
-    token: str
-    payment_method_id: Optional[str] = None  # Alterado para opcional
-    issuer_id: Optional[str] = None
-    installments: int
-
 
 # --- CONEXÃO COM O NEON ---
 def get_db_connection():
@@ -231,38 +223,6 @@ def gerar_pix(req: PixRequest):
         "qr_code_base64": payment["point_of_interaction"]["transaction_data"]["qr_code_base64"]
     }
 
-
-@app.post("/pagar-cartao")
-def pagar_cartao(req: CartaoRequest):
-    payment_data = {
-        "transaction_amount": 9.90,
-        "token": req.token,
-        "description": "Assinatura Mensal - Roterizador PRO",
-        "installments": req.installments,
-        "payer": {
-            "email": req.email
-        },
-        "external_reference": req.firebase_uid
-    }
-
-    # Nota: O payment_method_id foi removido daqui porque 
-    # o 'token' do cartão já informa a bandeira automaticamente ao Mercado Pago.
-
-    # Só envia o issuer_id se o Android tiver enviado um número válido
-    if req.issuer_id and req.issuer_id.isdigit():
-        payment_data["issuer_id"] = int(req.issuer_id)
-
-    result = sdk.payment().create(payment_data)
-    payment = result.get("response", {})
-
-    if "id" not in payment:
-        raise HTTPException(status_code=400, detail=f"Erro ao processar cartão: {payment}")
-
-    return {
-        "id_pagamento": payment["id"],
-        "status": payment.get("status"), 
-        "status_detail": payment.get("status_detail")
-    }
 
 @app.post("/webhook-mercadopago")
 async def webhook_mercadopago(request: Request):
