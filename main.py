@@ -20,6 +20,14 @@ app = FastAPI(title="API Motorista Pro")
 # Inicializa o SDK do Mercado Pago
 sdk = mercadopago.SDK(MERCADO_PAGO_ACCESS_TOKEN)
 
+# --- CONFIGURAÇÃO DOS PLANOS (Valores Progressivos) ---
+PLANOS = {
+    "mensal": {"dias": 30, "valor": 9.90, "desc": "Assinatura Mensal"},
+    "trimestral": {"dias": 90, "valor": 26.90, "desc": "Assinatura Trimestral"},
+    "semestral": {"dias": 180, "valor": 49.90, "desc": "Assinatura Semestral"},
+    "anual": {"dias": 365, "valor": 94.90, "desc": "Assinatura Anual"}
+}
+
 # --- MODELOS DE DADOS ---
 class UsuarioNovo(BaseModel):
     firebase_uid: str
@@ -45,6 +53,7 @@ class RotaBackup(BaseModel):
 class AssinaturaUpdate(BaseModel):
     firebase_uid: str
     status: str  # Ex: 'ATIVO', 'VENCIDA'
+    plano: str = "mensal" # Aceita 'mensal', 'trimestral', 'semestral', 'anual'
 
 # Modelos do Mercado Pago
 class PixRequest(BaseModel):
@@ -52,6 +61,7 @@ class PixRequest(BaseModel):
     email: str
     nome: str
     cpf: str
+    plano: str = "mensal"
 
 
 # --- CONEXÃO COM O NEON ---
@@ -170,18 +180,20 @@ def status_assinatura(firebase_uid: str):
 
 @app.post("/atualizar-assinatura")
 def atualizar_assinatura(req: AssinaturaUpdate):
-    """Rota usada pelo app (Mock do Google Billing) para ativar a assinatura por 30 dias."""
+    """Rota usada pelo app (Google Billing) para ativar a assinatura com base no plano escolhido."""
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
-        nova_data_vencimento = datetime.now() + timedelta(days=30)
+        plano_info = PLANOS.get(req.plano.lower(), PLANOS["mensal"])
+        nova_data_vencimento = datetime.now() + timedelta(days=plano_info["dias"])
+        
         cursor.execute("""
             UPDATE assinaturas 
             SET status = %s, data_vencimento = %s 
             WHERE firebase_uid = %s
         """, (req.status, nova_data_vencimento, req.firebase_uid))
         conn.commit()
-        return {"mensagem": "Assinatura atualizada com sucesso na nuvem!", "nova_data": nova_data_vencimento}
+        return {"mensagem": f"Assinatura {req.plano} atualizada com sucesso na nuvem!", "nova_data": nova_data_vencimento}
     except Exception as e:
         conn.rollback()
         raise HTTPException(status_code=500, detail=str(e))
@@ -191,13 +203,18 @@ def atualizar_assinatura(req: AssinaturaUpdate):
 
 
 # ==========================================
-# ROTAS DO MERCADO PAGO (CHECKOUT TRANSPARENTE)
+# ROTAS DO MERCADO PAGO (PIX COM PLANOS)
 # ==========================================
 
 @app.post("/gerar-pix")
 def gerar_pix(req: PixRequest):
+    plano_info = PLANOS.get(req.plano.lower(), PLANOS["mensal"])
+    
+    # Codifica o UID e o plano na external_reference para o Webhook identificar depois
+    external_ref = f"{req.firebase_uid}|{req.plano.lower()}"
+
     payment_data = {
-        "transaction_amount": 9.90,
+        "transaction_amount": plano_info["valor"],
         "payment_method_id": "pix",
         "payer": {
             "email": req.email,
@@ -207,8 +224,8 @@ def gerar_pix(req: PixRequest):
                 "number": req.cpf
             }
         },
-        "description": "Assinatura Mensal - Roterizador PRO",
-        "external_reference": req.firebase_uid # Identificador fundamental para o Webhook
+        "description": f"{plano_info['desc']} - Roterizador PRO",
+        "external_reference": external_ref 
     }
 
     result = sdk.payment().create(payment_data)
@@ -220,22 +237,20 @@ def gerar_pix(req: PixRequest):
     return {
         "id_pagamento": payment["id"],
         "pix_copia_cola": payment["point_of_interaction"]["transaction_data"]["qr_code"],
-        "qr_code_base64": payment["point_of_interaction"]["transaction_data"]["qr_code_base64"]
+        "qr_code_base64": payment["point_of_interaction"]["transaction_data"]["qr_code_base64"],
+        "plano_gerado": req.plano.lower()
     }
 
 
 @app.post("/webhook-mercadopago")
 async def webhook_mercadopago(request: Request):
     """
-    Recebe atualizações de status de pagamento.
-    Você precisa configurar essa URL lá no painel do Mercado Pago (Webhooks).
-    Ex: https://sua-api.onrender.com/webhook-mercadopago
+    Recebe atualizações de status de pagamento Pix do Mercado Pago.
     """
     try:
         data = await request.json()
         print(f"Webhook MP recebido: {data}")
 
-        # O MP pode enviar 'type' ou 'topic' dependendo de como o webhook foi criado
         tipo = data.get("type") or data.get("topic")
         data_payload = data.get("data", {})
         payment_id = data_payload.get("id")
@@ -244,17 +259,22 @@ async def webhook_mercadopago(request: Request):
             payment_id = data.get("id")
 
         if (tipo == "payment" or data.get("action") == "payment.updated" or data.get("action") == "payment.created") and payment_id:
-            # Consulta o status real do pagamento direto no Mercado Pago por segurança
             payment_info = sdk.payment().get(payment_id)
             payment_response = payment_info.get("response", {})
             status = payment_response.get("status")
-            firebase_uid = payment_response.get("external_reference")
+            
+            external_ref_raw = payment_response.get("external_reference", "")
+            
+            # Extrai o UID do Firebase e o Plano codificado
+            partes_ref = external_ref_raw.split("|")
+            firebase_uid = partes_ref[0] if len(partes_ref) > 0 else None
+            plano_str = partes_ref[1] if len(partes_ref) > 1 else "mensal"
 
-            print(f"Pagamento {payment_id} | Status: {status} | UID: {firebase_uid}")
+            print(f"Pagamento {payment_id} | Status: {status} | UID: {firebase_uid} | Plano: {plano_str}")
 
             if status == "approved" and firebase_uid:
-                # Pagamento aprovado! Adiciona 30 dias de assinatura
-                nova_data = datetime.now() + timedelta(days=30)
+                plano_info = PLANOS.get(plano_str, PLANOS["mensal"])
+                nova_data = datetime.now() + timedelta(days=plano_info["dias"])
                 
                 conn = get_db_connection()
                 cursor = conn.cursor()
@@ -265,7 +285,7 @@ async def webhook_mercadopago(request: Request):
                         WHERE firebase_uid = %s
                     """, (nova_data, firebase_uid))
                     conn.commit()
-                    print(f"Assinatura do UID {firebase_uid} renovada com sucesso!")
+                    print(f"Assinatura do UID {firebase_uid} renovada por {plano_info['dias']} dias com sucesso!")
                 except Exception as db_err:
                     conn.rollback()
                     print(f"Erro ao atualizar banco via webhook: {db_err}")
@@ -276,7 +296,6 @@ async def webhook_mercadopago(request: Request):
         return {"status": "ok"}
     except Exception as e:
         print(f"Erro crítico no processamento do webhook: {str(e)}")
-        # Sempre retorna 200 pro MP parar de reenviar a notificação
         return {"status": "error", "detail": str(e)}
 
 
